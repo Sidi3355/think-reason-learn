@@ -12,7 +12,7 @@ from sklearn.exceptions import NotFittedError
 from think_reason_learn import LLM, config_context
 from think_reason_learn.core._classifier import TRLClassifier
 from think_reason_learn.exceptions import DataError
-from think_reason_learn.llm import Price
+from think_reason_learn.llm import Price, Usage
 from think_reason_learn.rrf import RRF
 from think_reason_learn.testing import FakeLLM
 
@@ -32,16 +32,44 @@ def test_estimates_match_the_calls_made(
         assert planned.cost_usd > 0 and not planned.unpriced
         model.fit(X, y)
         made = model.usage_.calls
-        predicted = model.estimate_cost(NEW).calls
+        made_by_role = _calls_by_role(model.usage_)
+        predicted = model.estimate_cost(NEW)
         model.predict(NEW)
+    predicted_by_role = _calls_by_role(predicted)
+    predict_by_role = {
+        role: n - made_by_role.get(role, 0)
+        for role, n in _calls_by_role(model.usage_).items()
+    }
     if name in ("gptree", "policy", "policy-rules", "rule-mining"):
         # Counted at their most: every level, every refinement, every second
         # look. This toy tree stops at one level, a perfectly precise policy
         # stops refining, and only the good founders get a second look.
         assert made <= planned.calls
+    elif name == "rrf-decision":
+        # The decision model is asked once per distinct answer text, which only
+        # the answers reveal: its calls are counted at their most (here the toy
+        # answers give two texts), every other call exactly.
+        planned_by_role = _calls_by_role(planned)
+        assert made_by_role["combiner"] <= planned_by_role.pop("combiner")
+        assert predict_by_role["combiner"] <= predicted_by_role.pop("combiner")
+        assert planned_by_role == {
+            r: n for r, n in made_by_role.items() if r != "combiner"
+        }
+        predict_by_role.pop("combiner")
     else:
         assert planned.calls == made
-    assert math.isclose(predicted, model.usage_.calls - made, rel_tol=0.2)
+    assert math.isclose(
+        sum(predicted_by_role.values()), sum(predict_by_role.values()), rel_tol=0.2
+    )
+
+
+def _calls_by_role(usage: Usage) -> dict[str, int]:
+    """Calls per role of a ``Usage``."""
+    table = usage.by("role")
+    return {
+        str(role): int(calls)
+        for role, calls in zip(table["role"], table["calls"], strict=True)
+    }
 
 
 def test_later_prompts_carry_the_instructions(

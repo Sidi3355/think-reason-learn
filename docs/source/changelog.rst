@@ -3,6 +3,13 @@ Changelog
 
 Unreleased
 ----------
+- Random Rule Forest can hand its final decision to a decision model: ``combiner="decision"`` with
+  ``combiner_model=...`` (Jev, or Kev on your own server) reads each sample's answers as text, one line per rule,
+  and its probability is the score, with an F-beta threshold. ``think_reason_learn.rrf.answers_text`` builds
+  that text, so a decision model can be fine-tuned on exactly what it will read. See
+  :doc:`getting_started/decision_combiner`.
+- A decision model on a server without a key (``LLM(..., base_url=..., kind="decision")`` with no
+  ``api_key``) is called with no key header; an empty ``Bearer`` header used to stop every call.
 - The one-line package description on PyPI now opens with the website's headline and says what the library is.
 
 0.3.0

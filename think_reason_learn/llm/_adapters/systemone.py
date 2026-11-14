@@ -62,7 +62,10 @@ class SystemOneAdapter(DecisionAdapter):
 
 
 def _auth(endpoint: Endpoint) -> dict[str, str]:
-    key = endpoint.api_key or ""
+    """The key's header; none without a key (an open server of your own)."""
+    key = endpoint.api_key
+    if not key:
+        return {}
     return (
         {"api-key": key}
         if endpoint.api_key_header

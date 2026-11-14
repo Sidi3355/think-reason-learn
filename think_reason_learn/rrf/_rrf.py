@@ -12,6 +12,9 @@ threshold is tuned for F1 by cross-validation. The paper's vote is
 dropped, and the prediction is positive when at least T of the top N questions
 say YES, with (N, T) tuned by cross-validation; the paper also writes questions
 from a held-out generation set (``generation_size=500``) and uses ``beta=0.5``.
+``combiner="decision"`` hands the answers to a decision model instead: each sample's
+answers, as text, go to ``combiner_model`` (Jev, or Kev on your own server), whose
+probability that the sample is positive is the score, with an F-beta threshold.
 """
 
 from __future__ import annotations
@@ -28,7 +31,11 @@ from pydantic import BaseModel
 
 from think_reason_learn.core._answers import yes_probabilities
 from think_reason_learn.core._classifier import BinaryTRLClassifier, Labels, Proba
-from think_reason_learn.core._combine import LinearCombiner, fit_combiner
+from think_reason_learn.core._combine import (
+    LinearCombiner,
+    best_threshold,
+    fit_combiner,
+)
 from think_reason_learn.core._data import (
     Classes,
     ClassRatio,
@@ -47,15 +54,19 @@ from think_reason_learn.llm import (
     LLMSession,
     Models,
     UsageRecord,
+    YesNoQuestion,
     estimate_answers,
     estimate_generations,
     mean_tokens,
 )
 
+from ._decision import answers_text, default_question
 from ._prompts import INSTRUCTIONS_PURPOSE, QUESTION_INSTRUCTIONS, question_prompt
 from ._selection import as_yes, question_stats, rank, tune_vote
 
-type Combiner = Literal["vote", "elasticnet"]
+type Combiner = Literal["vote", "elasticnet", "decision"]
+
+_COMBINERS: tuple[Combiner, ...] = ("elasticnet", "vote", "decision")
 
 
 class RRF(BinaryTRLClassifier):
@@ -92,7 +103,20 @@ class RRF(BinaryTRLClassifier):
             better question's on fewer than this share of samples.
         combiner: ``"elasticnet"``, a logistic regression on the answers'
             probabilities that weighs every question (C of 1, L1 ratio of 0.1
-            or 0.5 by inner cross-validation), or ``"vote"``, the paper's.
+            or 0.5 by inner cross-validation); ``"vote"``, the paper's; or
+            ``"decision"``, a decision model reading each sample's answers as
+            text (see ``answers_text``), with an F-beta threshold on its
+            probabilities. Nothing is fitted for it here: the model decides as
+            it is, so fine-tune it elsewhere on ``answers_text`` of training
+            samples if it should learn the task. Its threshold is tuned on the
+            samples ``fit`` scores, so it is optimistic if the model was trained
+            on them.
+        combiner_model: Decision model(s) for ``combiner="decision"``, e.g.
+            ``"jev"`` or ``LLM("kev", base_url=".../v1/systemone",
+            kind="decision")``. Ignored by the other combiners.
+        combiner_question: The question ``combiner_model`` answers about each
+            sample's answers. ``None`` asks whether the sample is the positive
+            class, given ``task``.
         max_rules: Most questions the combiner may use, the best by F-beta.
         cv: Folds for tuning the elastic net or the vote.
         screening_size: Score every question on this many samples (int) or
@@ -123,6 +147,8 @@ class RRF(BinaryTRLClassifier):
         drop_below_base_rate: bool = True,
         hamming_threshold: float = 0.15,
         combiner: Combiner = "elasticnet",
+        combiner_model: Models | None = None,
+        combiner_question: str | None = None,
         max_rules: int | None = None,
         cv: int = 3,
         screening_size: int | float | None = None,
@@ -145,6 +171,8 @@ class RRF(BinaryTRLClassifier):
         self.drop_below_base_rate = drop_below_base_rate
         self.hamming_threshold = hamming_threshold
         self.combiner = combiner
+        self.combiner_model = combiner_model
+        self.combiner_question = combiner_question
         self.max_rules = max_rules
         self.cv = cv
         self.screening_size = screening_size
@@ -155,11 +183,15 @@ class RRF(BinaryTRLClassifier):
 
     example_class_ratio: ClassRatio
     combiner: Combiner
+    combiner_model: Models | None
+    combiner_question: str | None
     instructions_: str
     questions_: pd.DataFrame
     rules_: tuple[str, ...]
     min_votes_: int
     combiner_: LinearCombiner | None
+    decision_question_: str | None
+    """What the decision model is asked, when ``combiner="decision"`` was fitted."""
     threshold_: float
 
     def answers(self, X: TextInput) -> pd.DataFrame:
@@ -177,6 +209,7 @@ class RRF(BinaryTRLClassifier):
             raise ValueError("n_prompts=0 needs expert_questions=(...) to score.")
         writer = self._writer()
         self._models("answerer", "answer")  # fail before paying for questions
+        self._decider()
         rng = np.random.default_rng(self.random_state)
         generation, scoring = self._split_generation(y, len(self.classes_), rng)
         self.instructions_ = (
@@ -190,10 +223,16 @@ class RRF(BinaryTRLClassifier):
         questions, answers = await self._score(
             texts, scoring, positive[scoring], questions, session, rng
         )
-        await self._select(questions, answers, positive[scoring])
+        await self._select(questions, answers, positive[scoring], session)
 
     async def _apredict_proba(self, texts: list[str], session: LLMSession) -> Proba:
         answers = await self._answer(texts, self.rules_, session)
+        question = getattr(self, "decision_question_", None)
+        if question is not None:
+            scores = await self._decision_scores(
+                self.rules_, answers, question, session
+            )
+            return self._binary_proba(scores)
         return self._binary_proba(self._positive_scores(answers))
 
     def _positive_scores(
@@ -225,22 +264,70 @@ class RRF(BinaryTRLClassifier):
             else []
         )
         if self.screening_size is None or n_questions <= self.screened_questions:
-            return [
-                *planned,
-                estimate_answers(answerer, rows, [QUESTION_TOKENS] * n_questions),
+            answering = [
+                estimate_answers(answerer, rows, [QUESTION_TOKENS] * n_questions)
             ]
-        screen = count(self.screening_size, len(rows))
-        return [
-            *planned,
-            estimate_answers(answerer, rows[:screen], [QUESTION_TOKENS] * n_questions),
-            estimate_answers(
-                answerer, rows[screen:], [QUESTION_TOKENS] * self.screened_questions
-            ),
-        ]
+            kept = n_questions
+        else:
+            screen = count(self.screening_size, len(rows))
+            answering = [
+                estimate_answers(
+                    answerer, rows[:screen], [QUESTION_TOKENS] * n_questions
+                ),
+                estimate_answers(
+                    answerer, rows[screen:], [QUESTION_TOKENS] * self.screened_questions
+                ),
+            ]
+            kept = self.screened_questions
+        return [*planned, *answering, *self._decision_plan(len(rows), kept)]
 
     def _predict_plan(self, texts: list[str]) -> list[UsageRecord]:
         answerer = self._models("answerer", "answer")
-        return [estimate_answers(answerer, texts, list(self.rules_))]
+        plan = [estimate_answers(answerer, texts, list(self.rules_))]
+        if getattr(self, "decision_question_", None) is not None:
+            state = answers_text(self.rules_, [0.0] * len(self.rules_))
+            plan.append(
+                estimate_answers(
+                    self._models("combiner_model", "answer"),
+                    [state] * len(texts),
+                    [self.decision_question_ or ""],
+                    role="combiner",
+                )
+            )
+        return plan
+
+    def _decision_plan(self, n_samples: int, n_questions: int) -> list[UsageRecord]:
+        """The decision model's calls during ``fit``: one per scored sample."""
+        decider = self._decider()
+        if not decider:
+            return []
+        n_rules = min(n_questions, self.max_rules or n_questions)
+        # A rule's line is about a question's length; four characters a token.
+        state = "x" * (4 * n_rules * (QUESTION_TOKENS + 1))
+        question = self.combiner_question or default_question(self._task(), "yes")
+        return [
+            estimate_answers(decider, [state] * n_samples, [question], role="combiner")
+        ]
+
+    def _decider(self) -> tuple[Endpoint, ...]:
+        """The decision combiner's model(s); none for the other combiners.
+
+        Raises:
+            ValueError: ``combiner`` is unknown, or ``"decision"`` without a
+                ``combiner_model``.
+        """
+        if self.combiner not in _COMBINERS:
+            raise ValueError(
+                f"combiner={self.combiner!r} is not one of {list(_COMBINERS)}."
+            )
+        if self.combiner != "decision":
+            return ()
+        if self.combiner_model is None:
+            raise ValueError(
+                'combiner="decision" needs combiner_model=..., a decision model '
+                'such as "jev".'
+            )
+        return self._models("combiner_model", "answer")
 
     def _writer(self) -> tuple[Endpoint, ...]:
         """The generator, if questions are written: ``n_prompts=0`` needs none."""
@@ -363,6 +450,7 @@ class RRF(BinaryTRLClassifier):
         questions: list[str],
         answers: npt.NDArray[np.float64],
         positive: npt.NDArray[np.bool_],
+        session: LLMSession,
     ) -> None:
         yes = as_yes(answers)
         precision, recall, scores = question_stats(yes, positive, self.beta)
@@ -375,9 +463,12 @@ class RRF(BinaryTRLClassifier):
             }
         )
         self.combiner_, self.min_votes_ = None, 0
+        self.decision_question_ = None
         if self.combiner == "vote":
             # Tuning the vote is CPU work: off the shared event loop.
             used = await asyncio.to_thread(self._fit_vote, yes, positive)
+        elif self.combiner == "decision":
+            used = await self._fit_decision(questions, yes, answers, positive, session)
         else:
             used = await self._fit_elasticnet(yes, answers, positive)
         self.rules_ = tuple(questions[j] for j in used)
@@ -436,11 +527,74 @@ class RRF(BinaryTRLClassifier):
         self.threshold_ = self.combiner_.threshold
         return [ranked[j] for j in kept]
 
+    async def _fit_decision(
+        self,
+        questions: list[str],
+        yes: npt.NDArray[np.bool_],
+        answers: npt.NDArray[np.float64],
+        positive: npt.NDArray[np.bool_],
+        session: LLMSession,
+    ) -> list[int]:
+        """Rules for the decision model, best by F-beta first; sets its threshold.
+
+        Every question goes in (the best ``max_rules`` if set), so the model
+        reads them all; the threshold maximises F-beta on its probabilities for
+        the scored samples.
+        """
+        ranked = rank(
+            yes,
+            positive,
+            beta=self.beta,
+            drop_below_base_rate=False,
+            hamming_threshold=0,
+        )[: self.max_rules]
+        self.decision_question_ = self.combiner_question or default_question(
+            self._task(), self._positive_label()
+        )
+        if not ranked:
+            self.threshold_ = math.inf
+            return []
+        rules = [questions[j] for j in ranked]
+        scores = await self._decision_scores(
+            rules, answers[:, ranked], self.decision_question_, session
+        )
+        self.threshold_ = best_threshold(scores, positive, self.beta)
+        return ranked
+
+    async def _decision_scores(
+        self,
+        rules: Sequence[str],
+        answers: npt.NDArray[np.float64],
+        question: str,
+        session: LLMSession,
+    ) -> npt.NDArray[np.float64]:
+        """The decision model's probability that each sample is positive.
+
+        An unanswered sample scores 0, read as negative; the session warns
+        about every missing answer.
+        """
+        if not len(answers):
+            return np.zeros(0)
+        states = [answers_text(rules, row) for row in answers]
+        replies = await session.answer(
+            self._models("combiner_model", "answer"),
+            states,
+            {"positive": YesNoQuestion(question)},
+            role="combiner",
+        )
+        return np.array(
+            [
+                a.probability() if (a := row["positive"]) is not None else 0.0
+                for row in replies
+            ]
+        )
+
     def _summary(self) -> Mapping[str, object]:
         return {
             "instructions": self.instructions_,
             "rules": list(self.rules_),
             "min_votes": self.min_votes_,
+            "decision_question": getattr(self, "decision_question_", None),
             "threshold": self.threshold_,
             "questions": self.questions_.to_dict("records"),
         }

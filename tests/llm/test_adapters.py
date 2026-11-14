@@ -417,6 +417,19 @@ class TestSystemOne:
             sent[0].headers["api-key"] == "k" and "authorization" not in sent[0].headers
         )
 
+    def test_an_open_server_of_your_own_gets_no_key_header(self, wire: Wire) -> None:
+        # e.g. Kev serving System One on your machine: no key, so no header (an
+        # empty "Bearer " is an illegal header and the call would never be sent)
+        sent = wire(
+            lambda r: httpx2.Response(200, json={"answers": {"tech": {"noul": 0.4}}})
+        )
+        _, [result] = _answer(
+            LLM("kev", base_url="http://127.0.0.1:8009/v1/systemone", kind="decision")
+        )
+        assert "authorization" not in sent[0].headers
+        assert str(sent[0].url) == "http://127.0.0.1:8009/v1/systemone"
+        assert math.isclose(_yes(result, "tech") or 0.0, 0.4)
+
 
 class TestOpenAIDecisions:
     def test_predicate_choice_and_refusal(self, wire: Wire) -> None:

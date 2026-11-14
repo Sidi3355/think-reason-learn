@@ -42,6 +42,15 @@ _Y = ["good" if i % 2 else "bad" for i in range(80)]
 
 _MODELS: dict[str, Make] = {
     "rrf": lambda: RRF(task="t", generator=_WRITER, answerer=_JUDGE, n_prompts=3, cv=2),
+    "rrf-decision": lambda: RRF(
+        task="t",
+        generator=_WRITER,
+        answerer=_JUDGE,
+        n_prompts=3,
+        cv=2,
+        combiner="decision",
+        combiner_model=_JUDGE,
+    ),
     "rrf-screened": lambda: RRF(
         task="t",
         generator=_WRITER,
