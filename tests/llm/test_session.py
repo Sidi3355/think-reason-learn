@@ -529,3 +529,23 @@ def test_a_model_refusing_every_request_stops_the_run() -> None:
             )
         )
     assert broken.n_calls < 300
+
+
+def test_choice_descriptions_are_part_of_the_cache_key() -> None:
+    """A question asked with option descriptions is a different question; without
+    them, the key (and every reply already cached) is unchanged."""
+    judge = FakeLLM(answer=_answer)
+    plain = ChoiceQuestion("What stage is the company?", ("seed", "series_a"))
+    described = ChoiceQuestion(
+        "What stage is the company?", ("seed", "series_a"), ("no priced round", None)
+    )
+    with fake_llms(judge=judge):
+        models = _resolved("judge")
+        for question in (plain, plain, described, described):
+            run_sync(LLMSession().answer(models, ["x"], {"stage": question}, role="a"))
+    assert judge.n_calls == 2
+
+
+def test_a_description_per_label() -> None:
+    with pytest.raises(ValueError, match="one description per label"):
+        ChoiceQuestion("Stage?", ("seed", "series_a"), ("no priced round",))

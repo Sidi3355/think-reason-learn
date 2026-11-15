@@ -468,11 +468,19 @@ class _AnswerPass:
 
     def _key(self, i: int, qid: str) -> str:
         question = self.questions[qid]
+        identity: list[JSON] = [
+            question.text,
+            list(question.labels),
+            type(question).__name__,
+        ]
+        descriptions = getattr(question, "descriptions", None)
+        if descriptions is not None:  # absent: the key is unchanged, so caches hold
+            identity.append(list(descriptions))
         return cache_key(
             kind="answer",
             endpoint=_endpoint_identity(self.endpoint),
             sample=self.digests[i],
-            question=[question.text, list(question.labels), type(question).__name__],
+            question=identity,
             draw=self.draw,
         )
 

@@ -372,6 +372,21 @@ class TestSystemOne:
         assert record.served_model == "jev-1.13.0"
         assert record.cost_usd is not None and math.isclose(record.cost_usd, 0.042)
 
+    def test_choice_descriptions_are_sent_as_criteria(self, wire: Wire) -> None:
+        sent = wire(
+            lambda r: httpx2.Response(
+                200, json={"answers": {"stage": {"choice": "seed"}}, "usage": {}}
+            )
+        )
+        stage = ChoiceQuestion(
+            "Stage?", ("seed", "series_a"), ("before any priced round", None)
+        )
+        _answer(LLM("jev", api_key="k"), {"stage": stage})
+        assert json.loads(sent[0].content)["questions"]["stage"]["criteria"] == {
+            "seed": "before any priced round",
+            "series_a": None,
+        }
+
     def test_invalid_answers_are_unanswered(self, wire: Wire) -> None:
         wire(
             lambda r: httpx2.Response(

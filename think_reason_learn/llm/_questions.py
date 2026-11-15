@@ -35,10 +35,16 @@ class ChoiceQuestion:
     Args:
         text: The question.
         labels: The possible answers, at least two, all different.
+        descriptions: Optional, one per label, in the same order: what each label
+            means (``None`` for a label without one). Decision models that read
+            option descriptions (System One's ``criteria``) receive them, so a
+            model fine-tuned with them is asked exactly as it was trained. Other
+            providers see only the labels.
     """
 
     text: str
     labels: tuple[str, ...]
+    descriptions: tuple[str | None, ...] | None = None
 
     def __post_init__(self) -> None:
         """Check the labels, and keep them as a tuple (a list is accepted)."""
@@ -48,6 +54,14 @@ class ChoiceQuestion:
                 f"A choice question needs two or more different labels, got "
                 f"{self.labels}."
             )
+        if self.descriptions is not None:
+            object.__setattr__(self, "descriptions", tuple(self.descriptions))
+            if len(self.descriptions) != len(self.labels):
+                raise ValueError(
+                    f"A choice question needs one description per label: "
+                    f"{len(self.labels)} labels, {len(self.descriptions)} "
+                    "descriptions."
+                )
 
 
 type Question = YesNoQuestion | ChoiceQuestion

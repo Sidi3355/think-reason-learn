@@ -8,6 +8,9 @@ Unreleased
   and its probability is the score, with an F-beta threshold. ``think_reason_learn.rrf.answers_text`` builds
   that text, so a decision model can be fine-tuned on exactly what it will read. See
   :doc:`getting_started/decision_combiner`.
+- ``ChoiceQuestion`` takes optional ``descriptions``, one per label, sent to System One decision models as the
+  options' ``criteria`` (they were always sent empty), so a decision model fine-tuned with option descriptions is
+  asked exactly as it was trained. Questions without descriptions keep their cache keys.
 - A decision model on a server without a key (``LLM(..., base_url=..., kind="decision")`` with no
   ``api_key``) is called with no key header; an empty ``Bearer`` header used to stop every call.
 - The one-line package description on PyPI now opens with the website's headline and says what the library is.
