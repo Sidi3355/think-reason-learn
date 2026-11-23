@@ -11,7 +11,12 @@ import httpx2
 import pytest
 from pydantic import BaseModel
 
-from think_reason_learn.exceptions import LLMError, NoOutputError, ProviderAuthError
+from think_reason_learn.exceptions import (
+    LLMError,
+    NoOutputError,
+    ProviderAuthError,
+    ProviderDownError,
+)
 from think_reason_learn.llm import (
     LLM,
     Answers,
@@ -21,6 +26,7 @@ from think_reason_learn.llm import (
     Model,
     ReasoningEffort,
     YesNoQuestion,
+    config_context,
     resolve_models,
     run_sync,
 )
@@ -99,6 +105,18 @@ def _error(
         json={"error": {"message": message, "type": "error"}},
         headers=headers or {},
     )
+
+
+def _error_200(error: Mapping[str, object]) -> httpx2.Response:
+    # A failure as a gateway may report it: HTTP 200, the error in the body.
+    return httpx2.Response(200, json={"error": error}, headers={"retry-after": "0"})
+
+
+def _failed_choice(error: Mapping[str, object]) -> httpx2.Response:
+    # A reply that failed while it was written: cut-off text, the error on the choice.
+    body = json.loads(_chat('{"a1": "YE').content)
+    body["choices"][0] |= {"finish_reason": "error", "error": error}
+    return httpx2.Response(200, json=body)
 
 
 class TestOpenAICompatible:
@@ -204,6 +222,25 @@ class TestOpenAICompatible:
         sent = wire(lambda r: next(replies, None) or _chat('{"a1": "YES"}'))
         _, [result] = _answer(LLM("openai:gpt-5-mini", api_key="k"))
         assert len(sent) == 2 and result["tech"] is not None
+
+    @pytest.mark.parametrize(
+        "failed",
+        [
+            _error_200({"code": 429, "message": "Provider returned error"}),
+            _error_200({"message": "Upstream failed", "type": "server_error"}),
+            _failed_choice({"code": 502, "message": "Provider disconnected"}),
+        ],
+        ids=["code-429", "no-code", "finish-reason-error"],
+    )
+    def test_an_error_in_a_200_reply_is_retried(
+        self, wire: Wire, failed: httpx2.Response
+    ) -> None:
+        replies = iter([failed])
+        sent = wire(lambda r: next(replies, None) or _chat('{"a1": "YES"}'))
+        _, [result] = _answer(
+            LLM("openrouter:meta-llama/llama-3.3-70b-instruct", api_key="k")
+        )
+        assert len(sent) == 2 and _label(result, "tech") == "YES"
 
     def test_rejected_key_stops_the_run(self, wire: Wire) -> None:
         wire(lambda r: _error(401, "Incorrect API key provided"))
@@ -420,6 +457,17 @@ class TestSystemOne:
         with pytest.raises(LLMError, match="No answers"):
             _answer(LLM("jev", api_key="k"))
 
+    def test_an_error_in_a_200_reply_is_retried(self, wire: Wire) -> None:
+        replies = iter(
+            [_error_200({"code": 429, "message": "Provider returned error"})]
+        )
+        sent = wire(
+            lambda r: next(replies, None)
+            or httpx2.Response(200, json={"answers": {"tech": {"noul": 0.7}}})
+        )
+        _, [result] = _answer(LLM("jev", api_key="k"))
+        assert len(sent) == 2 and _yes(result, "tech") == 0.7
+
     def test_openrouter_decision_models_and_their_cost(self, wire: Wire) -> None:
         sent = wire(
             lambda r: httpx2.Response(
@@ -603,6 +651,61 @@ def test_an_unreadable_decision_is_retried_not_a_crash(wire: Wire) -> None:
     )
     _, [result] = _answer(LLM("openai:gpt-6-luna", api_key="k", kind="decision"))
     assert _label(result, "tech") == "YES" and len(sent) == 3
+
+
+_CHAT_AND_SYSTEM_ONE = pytest.mark.parametrize(
+    "model",
+    [LLM("openai:gpt-5-mini", api_key="sk-test"), LLM("jev", api_key="sk-test")],
+    ids=["chat", "system-one"],
+)
+
+
+@_CHAT_AND_SYSTEM_ONE
+def test_a_rejected_key_in_a_200_reply_stops_the_run(wire: Wire, model: LLM) -> None:
+    sent = wire(
+        lambda r: _error_200({"code": 401, "message": "Incorrect API key provided"})
+    )
+    session = LLMSession()
+    models = resolve_models(model, param="a", task="answer")
+    with pytest.raises(ProviderAuthError, match="Incorrect API key"):
+        run_sync(session.answer(models, ["An engineer."], TECH, role="a"))
+    [record] = list(session.usage)
+    assert len(sent) == 1 and "Incorrect API key" in (record.error or "")
+
+
+@_CHAT_AND_SYSTEM_ONE
+def test_a_model_that_only_sends_error_bodies_stops_the_run(
+    wire: Wire, model: LLM
+) -> None:
+    sent = wire(lambda r: _error_200({"code": 503, "message": "Provider is down"}))
+    models = resolve_models(model, param="a", task="answer")
+    samples = [f"Founder {i}." for i in range(40)]
+    with (
+        config_context(max_retries=0),
+        pytest.raises(ProviderDownError, match="keeps failing"),
+    ):
+        run_sync(LLMSession().answer(models, samples, TECH, role="a"))
+    assert len(sent) < 40  # it stopped instead of reading every sample as unanswered
+
+
+@pytest.mark.parametrize(
+    "error", [None, {"code": 429, "message": "Slow down"}], ids=["null", "set"]
+)
+def test_an_error_key_beside_usable_output_is_not_a_failure(
+    wire: Wire, error: Mapping[str, object] | None
+) -> None:
+    chat = json.loads(_chat('{"a1": "YES"}').content)
+    decision = {"answers": {"tech": {"noul": 0.7}}}
+
+    def reply(request: httpx2.Request) -> httpx2.Response:
+        body = chat if "chat/completions" in str(request.url) else decision
+        return httpx2.Response(200, json={**body, "error": error})
+
+    sent = wire(reply)
+    _, [written] = _answer(LLM("openai:gpt-5-mini", api_key="k"))
+    _, [decided] = _answer(LLM("jev", api_key="k"))
+    assert _label(written, "tech") == "YES" and _yes(decided, "tech") == 0.7
+    assert len(sent) == 2
 
 
 def test_reasoning_tokens_left_out_of_completion_tokens_are_counted(

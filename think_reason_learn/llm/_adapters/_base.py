@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import re
 import time
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 
 from .._usage import TokenCounts
 
@@ -198,6 +199,26 @@ def classify(
     if status in (400, 422) and (param := _rejected_param(lowered)) is not None:
         return ProviderError("rejected_param", message, param=param)
     return ProviderError("bad_request", message)
+
+
+def body_error(error: JsonValue, headers: Mapping[str, str]) -> ProviderError:
+    """Name an error a provider sent in the body of a 200 reply.
+
+    The error's own ``code`` (or ``status``) stands in for the HTTP status, so
+    the call is retried or not as a reply with that status would be. An error
+    with no HTTP status of its own is a server error: the call is retried.
+    """
+    fields: dict[str, JsonValue] = error if isinstance(error, dict) else {}
+    status = next(
+        (
+            code
+            for code in (fields.get("code"), fields.get("status"))
+            if isinstance(code, int) and 400 <= code <= 599
+        ),
+        500,
+    )
+    text = error if isinstance(error, str) else json.dumps(error, ensure_ascii=False)
+    return classify(status, f"Error in a 200 reply: {text}", headers)
 
 
 def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
