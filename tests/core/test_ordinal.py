@@ -117,6 +117,26 @@ def test_too_few_rows_for_folds_still_fits() -> None:
     assert scorer.cv_auc is None and out_of_fold.shape == (5, 3)
 
 
+def test_noisy_answers_do_not_get_the_strongest_penalty() -> None:
+    # 200 cases with outcomes 60/25/15%: four checks follow the outcome with
+    # noise and four are noise alone.
+    rng = np.random.default_rng(0)
+    latent = rng.normal(size=200)
+    y = np.digitize(latent, np.quantile(latent, [0.6, 0.85])).astype(np.intp)
+    signal = [latent] * 4 + [rng.normal(size=200) for _ in range(4)]
+    answers = np.column_stack(
+        [1 / (1 + np.exp(-2 * (s + rng.normal(size=200)))) for s in signal]
+    )
+    grid = (0.003, 0.03, 0.3, 3.0)
+    scorer, out_of_fold = fit_ordinal(answers, y, Cs=grid, cv=3, random_state=0)
+    predicted = np.bincount(decide(out_of_fold), minlength=3)
+    # Every C ranks these cases about as well, the smallest a hair better, but
+    # its probabilities stay near the outcome shares: chosen, it would give
+    # every case the most common outcome.
+    assert (predicted > 0).sum() > 1
+    assert min(grid) < scorer.C
+
+
 def test_balanced_cuts_split_the_outcomes() -> None:
     scores = np.array([0.1, 0.2, 0.3, 1.1, 1.2, 2.5, 2.6, 2.7, 2.8, 2.9])
     y = np.array([0, 0, 0, 1, 1, 2, 2, 2, 2, 2], dtype=np.intp)
