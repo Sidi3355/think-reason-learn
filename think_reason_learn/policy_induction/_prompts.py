@@ -40,10 +40,14 @@ def update_prompt(task: str, instructions: str, policy: str, cases: str) -> str:
     )
 
 
-def policy_question(task: str, policy: str) -> str:
-    """0.2's question: the task's answer for a sample, guided by a policy or rule."""
+def policy_question(task: str, policy: str, class_note: str = "") -> str:
+    """The task's answer for a sample, guided by a policy or rule, as 0.2 asked it.
+
+    ``class_note`` ends the question by saying which class YES means; it is
+    empty for a yes/no pair of labels (``core._prompts.class_note``).
+    """
     return (
         f"Task: {task}\nPolicy (guidance, not a strict rule): {policy}\n"
         "Considering this policy along with the sample's full content, is the "
-        "answer to the task YES?"
+        f"answer to the task YES?{class_note}"
     )

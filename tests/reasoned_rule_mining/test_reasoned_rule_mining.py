@@ -7,7 +7,12 @@ from functools import partial
 
 import pytest
 
-from think_reason_learn.llm import Question, config_context
+from think_reason_learn.llm import (
+    Question,
+    config_context,
+    estimate_answers,
+    resolve_models,
+)
 from think_reason_learn.reasoned_rule_mining import ReasonedRuleMining
 from think_reason_learn.testing import (
     FakeLLM,
@@ -114,6 +119,81 @@ def test_the_vote_question_carries_the_task(fakes: tuple[FakeLLM, FakeLLM]) -> N
     rule_mining().fit(FOUNDERS, LABELS)
     asked = {q for c in answerer.calls for q in c.questions}
     assert asked and all(q.count("Task: Will the founder succeed?") == 1 for q in asked)
+
+
+VOTE = (
+    "Task: Will the founder succeed?\n\nDecision policy:\n"
+    "YES when the founder is an engineer; otherwise NO.\n\n"
+    "Using the policy as the rubric, is the answer to the task YES?"
+)
+HARSH_VOTE = (
+    "Re-examine the sample with maximum scrutiny: say yes only if the evidence "
+    "for it is clear and strong, with nothing significant against it.\n\n" + VOTE
+)
+"""Both questions to the letter: answers are cached by their text."""
+
+HIT_MISS = ["hit" if "engineer" in f else "miss" for f in FOUNDERS]
+"""Labels whose positive class is, by default, "miss": the task's NO."""
+MISS_IS_YES = (
+    " Answer YES if the sample belongs to the class 'miss', and NO if it belongs "
+    "to the class 'hit'."
+)
+NAMED = re.compile(r"Answer YES if the sample belongs to the class '(\w+)'")
+
+
+def class_judge(sample: str, question: Question) -> float:
+    """``judge``, for the class the question says YES means, if it says."""
+    named = NAMED.search(question.text)
+    rated = judge(sample, question)  # for the task's YES, labelled "hit"
+    return 1 - rated if named is not None and named[1] == "miss" else rated
+
+
+def test_both_questions_name_a_positive_class_that_is_not_a_yes(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    _, answerer = fakes
+    model = rule_mining().fit(FOUNDERS, HIT_MISS)
+    vote, harsh = sorted({q for c in answerer.calls for q in c.questions}, key=len)
+    assert (vote, harsh) == (VOTE + MISS_IS_YES, HARSH_VOTE + MISS_IS_YES)
+    models = resolve_models("fake:judge", param="answerer", task="answer")
+    reviewed = FOUNDERS[: round(len(FOUNDERS) * model.harsh_share_)]
+    assert [r.input_tokens for r in model.estimate_cost(FOUNDERS)] == [
+        estimate_answers(models, FOUNDERS, [vote]).input_tokens,
+        estimate_answers(models, reviewed, [harsh]).input_tokens,
+    ]  # the plan counts the questions as they are asked
+
+
+def test_the_harsh_look_goes_to_likely_positives_whatever_the_labels() -> None:
+    first, harsh = (
+        FakeLLM(answer=class_judge, kind="decision"),
+        FakeLLM(answer=class_judge, kind="decision"),
+    )
+    with fake_llms(writer=FakeLLM(generate=write), judge=first, harsh=harsh):
+        model = rule_mining(harsh_answerer="fake:harsh").fit(FOUNDERS, HIT_MISS)
+        predicted = model.predict(["an engineer", "a poet"])
+    reviewed = {c.sample for c in harsh.calls}
+    assert reviewed and not any("engineer" in (s or "") for s in reviewed)
+    assert list(predicted) == ["hit", "miss"]
+
+
+def test_yes_no_labels_keep_both_questions_to_the_letter(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    _, answerer = fakes
+    rule_mining().fit(FOUNDERS, LABELS)
+    assert {q for c in answerer.calls for q in c.questions} == {VOTE, HARSH_VOTE}
+
+
+def test_a_model_fitted_before_classes_were_named_keeps_its_questions(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    _, answerer = fakes
+    model = rule_mining().fit(FOUNDERS, HIT_MISS)
+    del model.class_note_  # as loaded from a file saved before the note existed
+    asked = answerer.n_calls
+    model.predict(["founder: engineer, exit"])  # rated highly, so looked at twice
+    again = [q for c in answerer.calls[asked:] for q in c.questions]
+    assert again == [VOTE, HARSH_VOTE]
 
 
 def test_rare_positives_still_calibrate_on_unmined_samples() -> None:

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from functools import partial
+from typing import Literal
 
 import pytest
 
 from think_reason_learn.exceptions import LLMError
-from think_reason_learn.llm import Question
+from think_reason_learn.llm import Question, estimate_answers, resolve_models
 from think_reason_learn.policy_induction import PolicyInduction
 from think_reason_learn.testing import (
     FakeLLM,
@@ -158,6 +160,88 @@ def test_the_answerer_sees_the_task_and_0_2s_wording(
     [question] = judge.calls[0].questions
     assert "Task: Will the founder succeed?" in question
     assert "guidance, not a strict rule" in question
+
+
+ASKED_ABOUT_GOOD = (
+    "Task: Will the founder succeed?\n"
+    "Policy (guidance, not a strict rule): Founders who are engineers succeed.\n"
+    "Considering this policy along with the sample's full content, is the "
+    "answer to the task YES?"
+)
+"""The question about ``GOOD`` to the letter: answers are cached by its text."""
+
+MISS_IS_YES = (
+    " Answer YES if the sample belongs to the class 'miss', and NO if it belongs "
+    "to the class 'hit'."
+)
+NAMED = re.compile(r"Answer YES if the sample belongs to the class '(\w+)'")
+
+
+def class_judge(sample: str, question: Question) -> float:
+    """``judge_answer``, for the class the question says YES means, if it says."""
+    named = NAMED.search(question.text)
+    succeeds = judge_answer(sample, question)  # the task's YES, labelled "hit"
+    return 1 - succeeds if named is not None and named[1] == "miss" else succeeds
+
+
+@pytest.mark.parametrize("predictor", ["policy", "rules"])
+def test_the_question_names_a_positive_class_that_is_not_a_yes(
+    predictor: Literal["policy", "rules"],
+) -> None:
+    judge = FakeLLM(answer=class_judge, kind="decision")
+    with fake_llms(writer=FakeLLM(generate=writer(GOOD)), judge=judge):
+        model = policy_induction(  # by default the positive class is "miss"
+            pos_label=None, initial_policy=GOOD, n_rounds=0, predictor=predictor
+        ).fit(FOUNDERS, LABELS)
+        [planned] = model.estimate_cost(FOUNDERS)
+        answerer = resolve_models("fake:judge", param="answerer", task="answer")
+        asked = estimate_answers(answerer, FOUNDERS, [ASKED_ABOUT_GOOD + MISS_IS_YES])
+    assert {q for c in judge.calls for q in c.questions} == {
+        ASKED_ABOUT_GOOD + MISS_IS_YES
+    }
+    assert planned.input_tokens == asked.input_tokens  # the plan counts it too
+
+
+def test_policy_predictor_is_right_when_the_positive_class_is_not_a_yes() -> None:
+    with fake_llms(
+        writer=FakeLLM(generate=writer(GOOD)),
+        judge=FakeLLM(answer=class_judge, kind="decision"),
+    ):
+        model = policy_induction(pos_label=None, initial_policy=GOOD, n_rounds=0)
+        predicted = model.fit(FOUNDERS, LABELS).predict(FOUNDERS)
+    assert list(predicted) == LABELS
+
+
+def test_memory_judges_a_rewrite_for_the_positive_class() -> None:
+    with fake_llms(
+        writer=FakeLLM(generate=writer(BAD)),
+        judge=FakeLLM(answer=class_judge, kind="decision"),
+    ):
+        model = policy_induction(pos_label=None, initial_policy=GOOD)
+        model.fit(FOUNDERS, LABELS)
+    assert model.policy_ == GOOD  # the right policy is not given up for a wrong one
+
+
+@pytest.mark.parametrize(("no", "yes"), [("NO", "YES"), (False, True), (0, 1)])
+def test_yes_no_labels_keep_the_question_to_the_letter(
+    fakes: tuple[FakeLLM, FakeLLM], no: object, yes: object
+) -> None:
+    _, judge = fakes
+    labels = [yes if "engineer" in f else no for f in FOUNDERS]
+    policy_induction(pos_label=None, initial_policy=GOOD, n_rounds=0).fit(
+        FOUNDERS, labels
+    )
+    assert {q for c in judge.calls for q in c.questions} == {ASKED_ABOUT_GOOD}
+
+
+def test_a_model_fitted_before_classes_were_named_keeps_its_question(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    _, judge = fakes
+    model = policy_induction(initial_policy=GOOD, n_rounds=0).fit(FOUNDERS, LABELS)
+    del model.class_note_  # as loaded from a file saved before the note existed
+    model.predict(["a poet"])
+    assert judge.calls[-1].questions == (ASKED_ABOUT_GOOD,)
 
 
 def test_policy_predictor_takes_the_answerers_call(

@@ -6,9 +6,10 @@ import math
 import time
 from collections.abc import Callable
 
+import numpy as np
 import pytest
 
-from think_reason_learn.core._prompts import most_written
+from think_reason_learn.core._prompts import class_note, most_written
 from think_reason_learn.exceptions import ProviderAuthError
 from think_reason_learn.llm import LLM, LLMSession, Price, resolve_models, run_sync
 from think_reason_learn.llm._adapters import ProviderError
@@ -17,6 +18,34 @@ from think_reason_learn.llm._usage import TokenCounts
 from think_reason_learn.testing import FakeLLM, GenerateRequest, fake_llms
 
 type SlowWrites = Callable[[Callable[[str], float]], list[str]]
+
+
+@pytest.mark.parametrize(
+    "classes",
+    [["NO", "YES"], ["no", " Yes "], [False, True], ["FALSE", "true"], [0, 1]],
+)
+def test_a_yes_no_pair_needs_no_class_note(classes: list[object]) -> None:
+    assert class_note(np.array(classes), 1) == ""
+
+
+@pytest.mark.parametrize(
+    ("classes", "pos", "positive", "negative"),
+    [
+        (["hit", "miss"], 1, "miss", "hit"),  # the default: the second sorted label
+        (["hit", "miss"], 0, "hit", "miss"),
+        (["NO", "YES"], 0, "NO", "YES"),  # a pair the other way round is named
+        ([0, 1], 0, "0", "1"),
+        (["no", "true"], 1, "true", "no"),  # one of each pair is not a pair
+        ([1, 2], 0, "1", "2"),
+    ],
+)
+def test_other_classes_are_named_positive_first(
+    classes: list[object], pos: int, positive: str, negative: str
+) -> None:
+    assert class_note(np.array(classes), pos) == (
+        f" Answer YES if the sample belongs to the class '{positive}', and NO if "
+        f"it belongs to the class '{negative}'."
+    )
 
 
 def test_a_fatal_error_cancels_the_other_writing_calls(

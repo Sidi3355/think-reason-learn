@@ -24,6 +24,9 @@ to avoid (anything that restates the label, or that cannot be judged from a
 sample's text alone). Do not invent facts about the data. Reply with the
 instructions only."""
 
+_YES_NO: Final = (("yes", "no"), ("true", "false"), ("1", "0"))
+"""Pairs of labels, positive first, that read as a judge's YES and NO as they are."""
+
 
 async def most_written[T](calls: Sequence[Awaitable[T]], what: str) -> list[T]:
     """The replies of ``calls`` run at once, skipping those that wrote nothing.
@@ -67,6 +70,28 @@ def examples_block(
     return "\n\n".join(
         f"Example {n} (label: {classes[codes[i]]}):\n{texts[i]}"
         for n, i in enumerate(indices, 1)
+    )
+
+
+def class_note(classes: Classes, pos: int) -> str:
+    """The sentence that ends a judge's question by saying which class YES means.
+
+    "Is the answer to the task YES?" does not say that the positive class is
+    ``'miss'`` of ``'hit'``/``'miss'``, so the note names both classes. It is
+    empty when the positive class reads as yes and the other as no: ``yes`` and
+    ``no``, ``true`` and ``false`` or ``1`` and ``0`` as text, in any case. Such
+    questions, and their cached answers, stay as they were.
+
+    Args:
+        classes: The two classes.
+        pos: Index of the positive class.
+    """
+    positive, negative = str(classes[pos]), str(classes[1 - pos])
+    if (positive.strip().casefold(), negative.strip().casefold()) in _YES_NO:
+        return ""
+    return (
+        f" Answer YES if the sample belongs to the class '{positive}', and NO if "
+        f"it belongs to the class '{negative}'."
     )
 
 
