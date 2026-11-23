@@ -166,6 +166,20 @@ def test_policy_predictor_takes_the_answerers_call(
     assert policy_induction().fit(FOUNDERS, LABELS).threshold_ == 0.5
 
 
+def test_an_unknown_predictor_fails_before_any_call(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    write, judge = fakes
+    for predictor in ("Policy", "whole-policy"):
+        model = policy_induction(predictor=predictor)  # pyright: ignore[reportArgumentType]  # misspelt on purpose
+        wrong = rf"predictor must be one of \('policy', 'rules'\), got '{predictor}'\."
+        with pytest.raises(ValueError, match=wrong):
+            model.fit(FOUNDERS, LABELS)
+        with pytest.raises(ValueError, match=wrong):
+            model.estimate_cost(FOUNDERS, LABELS)
+    assert write.n_calls == judge.n_calls == 0
+
+
 def test_each_round_asks_for_fresh_refinements() -> None:
     write = FakeLLM(generate=writer(BAD))
     with fake_llms(writer=write, judge=FakeLLM(answer=judge_answer, kind="decision")):

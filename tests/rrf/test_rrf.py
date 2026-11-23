@@ -183,6 +183,20 @@ def test_bad_data_and_settings_fail_before_any_call(
     assert writer.n_calls == judge.n_calls == 0
 
 
+def test_an_unknown_combiner_fails_before_any_call(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    writer, judge = fakes
+    for combiner in ("Vote", "votes"):
+        model = rrf(combiner=combiner)  # pyright: ignore[reportArgumentType]  # misspelt on purpose
+        wrong = rf"combiner must be one of \('vote', 'elasticnet'\), got '{combiner}'\."
+        with pytest.raises(ValueError, match=wrong):
+            model.fit(FOUNDERS, LABELS)
+        with pytest.raises(ValueError, match=wrong):
+            model.estimate_cost(FOUNDERS, LABELS)
+    assert writer.n_calls == judge.n_calls == 0
+
+
 def test_elasticnet_warns_when_it_weighs_no_question(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

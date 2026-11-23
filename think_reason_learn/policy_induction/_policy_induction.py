@@ -21,7 +21,7 @@ import itertools
 import logging
 import math
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Final, Literal
+from typing import Final, Literal, get_args
 
 import numpy as np
 import numpy.typing as npt
@@ -77,6 +77,8 @@ _HISTORY: Final = pd.Index(["round", "cases", "fbeta_before", "fbeta_after", "ke
 
 type Predictor = Literal["policy", "rules"]
 type _Step = tuple[int, int, float, float, bool]
+
+PREDICTORS: Final[tuple[Predictor, ...]] = get_args(Predictor.__value__)
 
 
 class PolicyInduction(BinaryTRLClassifier):
@@ -290,6 +292,13 @@ class PolicyInduction(BinaryTRLClassifier):
         if self.initial_policy and not self.n_rounds:
             return ()
         return self._models("generator", "generate")
+
+    def _check_classes(self, classes: Classes) -> None:
+        super()._check_classes(classes)
+        if self.predictor not in PREDICTORS:
+            raise ValueError(
+                f"predictor must be one of {PREDICTORS}, got {self.predictor!r}."
+            )
 
     def _predict_plan(self, texts: list[str]) -> list[UsageRecord]:
         answerer = self._models("answerer", "answer")

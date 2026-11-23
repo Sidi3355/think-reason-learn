@@ -96,6 +96,20 @@ def test_no_harsh_look_when_off(fakes: tuple[FakeLLM, FakeLLM]) -> None:
     assert not any(c.questions[0].startswith("Re-examine") for c in answerer.calls)
 
 
+def test_an_unknown_harsh_level_fails_before_any_call(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    writer, answerer = fakes
+    allowed = r"harsh_level must be one of \('light', 'moderate', 'strict'\)"
+    for level in ("severe", "Strict"):
+        model = rule_mining(harsh_level=level)  # pyright: ignore[reportArgumentType]  # misspelt on purpose
+        with pytest.raises(ValueError, match=rf"{allowed}, got '{level}'\."):
+            model.fit(FOUNDERS, LABELS)
+        with pytest.raises(ValueError, match=rf"{allowed}, got '{level}'\."):
+            model.estimate_cost(FOUNDERS, LABELS)
+    assert writer.n_calls == answerer.n_calls == 0
+
+
 def test_reasoning_answerers_vote_in_an_ensemble() -> None:
     voter = FakeLLM(answer=lambda s, q: "YES" if "engineer" in s else "NO")
     with fake_llms(writer=FakeLLM(generate=write), judge=voter):

@@ -10,7 +10,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Final, Literal
+from typing import Final, Literal, get_args
 from urllib.parse import urlparse
 
 from think_reason_learn.exceptions import MissingAPIKeyError
@@ -26,6 +26,8 @@ type ModelName = str
 
 type ModelKind = Literal["reasoning", "decision"]
 """Reasoning models write text and answer questions; decision models only answer."""
+
+MODEL_KINDS: Final[tuple[ModelKind, ...]] = get_args(ModelKind.__value__)
 
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 
@@ -93,6 +95,10 @@ class LLM:
         if self.questions_per_call < 1:
             raise ValueError(
                 f"questions_per_call must be >= 1, got {self.questions_per_call}."
+            )
+        if self.kind is not None and self.kind not in MODEL_KINDS:
+            raise ValueError(
+                f"kind must be one of {MODEL_KINDS} or None, got {self.kind!r}."
             )
 
     def __copy__(self) -> LLM:

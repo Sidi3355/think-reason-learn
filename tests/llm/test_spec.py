@@ -17,6 +17,7 @@ from think_reason_learn.llm import (
     resolve_models,
 )
 from think_reason_learn.llm._spec import keys_optional, resolve
+from think_reason_learn.testing import FakeLLM, fake_llms
 
 
 @pytest.fixture(autouse=True)
@@ -231,6 +232,18 @@ def test_llm_checks_settings() -> None:
         LLM("openai:gpt-5-mini", temperature=-1.0)
     with pytest.raises(ValueError, match="questions_per_call"):
         LLM("openai:gpt-5-mini", questions_per_call=0)
+
+
+def test_llm_refuses_an_unknown_kind() -> None:
+    judge = FakeLLM(answer=lambda sample, question: 0.9)
+    allowed = r"kind must be one of \('reasoning', 'decision'\) or None"
+    with fake_llms(judge=judge):
+        for kind in ("decisions", "Decision"):
+            with pytest.raises(ValueError, match=rf"{allowed}, got '{kind}'\."):
+                LLM("fake:judge", kind=kind)  # pyright: ignore[reportArgumentType]  # misspelt on purpose
+        assert resolve(LLM("fake:judge")).kind == "reasoning"  # None: as before
+        assert resolve(LLM("fake:judge", kind="decision")).kind == "decision"
+    assert judge.n_calls == 0  # refused when written, before anything is called
 
 
 def test_api_key_is_hidden_from_repr() -> None:
