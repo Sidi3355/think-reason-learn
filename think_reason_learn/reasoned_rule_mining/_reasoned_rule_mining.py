@@ -51,6 +51,7 @@ from think_reason_learn.llm import (
 
 from ._prompts import (
     COMPILE_INSTRUCTIONS,
+    HARSH,
     MINING_INSTRUCTIONS,
     HarshLevel,
     compile_prompt,
@@ -199,6 +200,14 @@ class ReasonedRuleMining(BinaryTRLClassifier):
                 estimate_answers(models, promoted, [harsh], times=self._draws(models))
             )
         return planned
+
+    def _check_classes(self, classes: Classes) -> None:
+        super()._check_classes(classes)
+        levels = tuple(HARSH)
+        if self.harsh_level not in levels:
+            raise ValueError(
+                f"harsh_level must be one of {levels}, got {self.harsh_level!r}."
+            )
 
     def _calibration_samples(
         self, positive: npt.NDArray[np.bool_], mined: npt.NDArray[np.intp]

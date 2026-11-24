@@ -279,6 +279,20 @@ def test_bad_settings_fail_before_any_call(fakes: tuple[FakeLLM, FakeLLM]) -> No
     assert writer.n_calls == judge.n_calls == 0
 
 
+def test_an_unknown_criterion_fails_before_any_call(
+    fakes: tuple[FakeLLM, FakeLLM],
+) -> None:
+    writer, judge = fakes
+    for criterion in ("Gini", "gin"):
+        model = tree(criterion=criterion)  # pyright: ignore[reportArgumentType]  # misspelt on purpose
+        wrong = rf"criterion must be one of \('gini', 'entropy'\), got '{criterion}'\."
+        with pytest.raises(ValueError, match=wrong):
+            model.fit(FOUNDERS, LABELS)
+        with pytest.raises(ValueError, match=wrong):
+            model.estimate_cost(FOUNDERS, LABELS)
+    assert writer.n_calls == judge.n_calls == 0
+
+
 def test_a_failed_critic_keeps_the_written_questions() -> None:
     with fake_llms(
         writer=FakeLLM(generate=write),

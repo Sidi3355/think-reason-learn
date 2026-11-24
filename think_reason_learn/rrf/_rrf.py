@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import Final, Literal, get_args
 
 import numpy as np
 import numpy.typing as npt
@@ -56,6 +56,8 @@ from ._prompts import INSTRUCTIONS_PURPOSE, QUESTION_INSTRUCTIONS, question_prom
 from ._selection import as_yes, question_stats, rank, tune_vote
 
 type Combiner = Literal["vote", "elasticnet"]
+
+COMBINERS: Final[tuple[Combiner, ...]] = get_args(Combiner.__value__)
 
 
 class RRF(BinaryTRLClassifier):
@@ -249,6 +251,10 @@ class RRF(BinaryTRLClassifier):
     def _check_classes(self, classes: Classes) -> None:
         super()._check_classes(classes)
         class_shares(classes, self.example_class_ratio)  # a bad ratio fails now
+        if self.combiner not in COMBINERS:
+            raise ValueError(
+                f"combiner must be one of {COMBINERS}, got {self.combiner!r}."
+            )
 
     def _split_generation(
         self, y: Labels, n_classes: int, rng: np.random.Generator

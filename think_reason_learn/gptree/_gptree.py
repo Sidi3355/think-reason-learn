@@ -74,7 +74,7 @@ from ._prompts import (
     QUESTION_INSTRUCTIONS,
     YES_NO,
 )
-from ._split import Criterion, Split, best_split
+from ._split import CRITERIA, Criterion, Split, best_split
 from ._tree import Node, Tree
 
 logger = logging.getLogger(__name__)
@@ -307,6 +307,10 @@ class GPTree(TRLClassifier):
         class_shares(classes, self.example_class_ratio)  # a bad ratio fails now
         if len(classes) == 2:
             positive_index(classes, self.pos_label)  # a bad pos_label fails now
+        if self.criterion not in CRITERIA:
+            raise ValueError(
+                f"criterion must be one of {CRITERIA}, got {self.criterion!r}."
+            )
 
     def _decide(self, proba: Proba) -> Labels:
         if self.threshold_ is None:
