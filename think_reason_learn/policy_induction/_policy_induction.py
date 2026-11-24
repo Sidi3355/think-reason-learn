@@ -47,7 +47,7 @@ from think_reason_learn.core._data import (
     example_batches,
     take,
 )
-from think_reason_learn.core._prompts import examples_block
+from think_reason_learn.core._prompts import class_note, examples_block
 from think_reason_learn.exceptions import NoOutputError
 from think_reason_learn.llm import (
     QUESTION_TOKENS,
@@ -85,7 +85,8 @@ class PolicyInduction(BinaryTRLClassifier):
     """A policy of rules, refined batch by batch, its rules weighed to predict.
 
     For two classes; the positive class is ``pos_label`` (by default the second
-    sorted label).
+    sorted label). The answerer is told which class its YES means, unless the
+    labels already are a yes/no pair.
 
     Args:
         task: What to predict, in plain words.
@@ -163,6 +164,8 @@ class PolicyInduction(BinaryTRLClassifier):
 
     predictor: Predictor
     instructions_: str
+    class_note_: str
+    """The end of each question to the answerer, saying which class its YES means."""
     policy_: tuple[str, ...]
     weighted_rules_: tuple[str, ...]
     history_: pd.DataFrame
@@ -170,6 +173,7 @@ class PolicyInduction(BinaryTRLClassifier):
 
     async def _afit(self, texts: list[str], y: Labels, session: LLMSession) -> None:
         positive = self._positive(y)
+        self.class_note_ = class_note(self.classes_, self._pos_index())
         writer = self._writer()
         self._models("answerer", "answer")  # fail before paying for the policy
         rng = np.random.default_rng(self.random_state)
@@ -414,9 +418,13 @@ class PolicyInduction(BinaryTRLClassifier):
         return scores[:, 0]
 
     def _policy_question(self, policy: Sequence[str]) -> str:
-        """The question that judges a sample under a policy, or one rule."""
+        """The question that judges a sample under a policy, or one rule.
+
+        It ends with ``class_note_``. A model fitted before the classes were
+        named has none, and keeps the question it was fitted with.
+        """
         rules = policy[0] if len(policy) == 1 else _numbered(policy)
-        return policy_question(self._task(), rules)
+        return policy_question(self._task(), rules, getattr(self, "class_note_", ""))
 
     def _fbeta(
         self, scores: npt.NDArray[np.float64], positive: npt.NDArray[np.bool_]

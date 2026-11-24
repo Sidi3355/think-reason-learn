@@ -41,14 +41,23 @@ def compile_prompt(task: str, rules_by_class: dict[str, list[str]]) -> str:
     return f"Task: {task}\n\n{blocks}"
 
 
-def vote_question(task: str, policy: str) -> str:
-    """The cheap first-pass question: the task's answer, with the policy as rubric."""
+def vote_question(task: str, policy: str, class_note: str = "") -> str:
+    """The cheap first-pass question: the task's answer, with the policy as rubric.
+
+    ``class_note`` ends the question by saying which class YES means; it is
+    empty for a yes/no pair of labels (``core._prompts.class_note``).
+    """
     return (
         f"Task: {task}\n\nDecision policy:\n{policy}\n\n"
-        "Using the policy as the rubric, is the answer to the task YES?"
+        f"Using the policy as the rubric, is the answer to the task YES?{class_note}"
     )
 
 
-def harsh_question(task: str, policy: str, level: HarshLevel) -> str:
-    """The second-pass question for samples the first pass rated highly."""
-    return f"{HARSH[level]}\n\n{vote_question(task, policy)}"
+def harsh_question(
+    task: str, policy: str, level: HarshLevel, class_note: str = ""
+) -> str:
+    """The second-pass question for samples the first pass rated highly.
+
+    The first-pass question, ``class_note`` included, after a call for scrutiny.
+    """
+    return f"{HARSH[level]}\n\n{vote_question(task, policy, class_note)}"

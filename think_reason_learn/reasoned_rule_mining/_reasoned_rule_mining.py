@@ -34,7 +34,7 @@ from think_reason_learn.core._classifier import (
 )
 from think_reason_learn.core._combine import LinearCombiner, fit_combiner, held_out_rows
 from think_reason_learn.core._data import Classes, balanced_subset, take
-from think_reason_learn.core._prompts import most_written
+from think_reason_learn.core._prompts import class_note, most_written
 from think_reason_learn.exceptions import NoOutputError
 from think_reason_learn.llm import (
     GENERATE_OUTPUT_TOKENS,
@@ -70,7 +70,8 @@ class ReasonedRuleMining(BinaryTRLClassifier):
     """Rules mined from reasoning about labelled samples, applied in a cascade.
 
     For two classes; the positive class is ``pos_label`` (by default the second
-    sorted label).
+    sorted label). The answerer is told which class its YES means, unless the
+    labels already are a yes/no pair.
 
     Args:
         task: What to predict, in plain words.
@@ -128,6 +129,8 @@ class ReasonedRuleMining(BinaryTRLClassifier):
         self.verbose = verbose
 
     harsh_level: HarshLevel
+    class_note_: str
+    """The end of each question to the answerer, saying which class its YES means."""
     mined_rules_: tuple[tuple[str, str], ...]
     policy_: str
     combiner_: LinearCombiner
@@ -136,6 +139,7 @@ class ReasonedRuleMining(BinaryTRLClassifier):
 
     async def _afit(self, texts: list[str], y: Labels, session: LLMSession) -> None:
         positive = self._positive(y)
+        self.class_note_ = class_note(self.classes_, self._pos_index())
         rng = np.random.default_rng(self.random_state)
         mined = self._mined_samples(y, rng)
         writer = self._models("generator", "generate")
@@ -175,12 +179,23 @@ class ReasonedRuleMining(BinaryTRLClassifier):
         ]
 
     def _predict_plan(self, texts: list[str]) -> list[UsageRecord]:
-        task, share = self._task(), self.harsh_share_ if self._harsh_counts() else 0.0
+        share = self.harsh_share_ if self._harsh_counts() else 0.0
         return self._judging_plan(
             texts,
             texts[: round(len(texts) * share)],
-            vote_question(task, self.policy_),
-            harsh_question(task, self.policy_, self.harsh_level),
+            *self._questions(),
+        )
+
+    def _questions(self) -> tuple[str, str]:
+        """The first-pass question and the harsh one, as planned and as asked.
+
+        Both end with ``class_note_``. A model fitted before the classes were
+        named has none, and keeps the questions it was calibrated with.
+        """
+        task, note = self._task(), getattr(self, "class_note_", "")
+        return (
+            vote_question(task, self.policy_, note),
+            harsh_question(task, self.policy_, self.harsh_level, note),
         )
 
     def _judging_plan(
@@ -287,20 +302,19 @@ class ReasonedRuleMining(BinaryTRLClassifier):
 
         With ``harsh=False`` no sample gets the second look.
         """
-        task = self._task()
+        vote, harsh_look = self._questions()
         first = await self._judge(
             self._models("answerer", "answer"),
-            vote_question(task, self.policy_),
+            vote,
             texts,
             session,
         )
         second = np.full(len(texts), 0.5)
         promoted = first >= self.harsh_gate if harsh else np.zeros(len(texts), bool)
         if promoted.any():
-            question = harsh_question(task, self.policy_, self.harsh_level)
             reviewed = take(texts, np.flatnonzero(promoted))
             second[promoted] = await self._judge(
-                self._harsh_models(), question, reviewed, session
+                self._harsh_models(), harsh_look, reviewed, session
             )
         return np.column_stack(
             [
