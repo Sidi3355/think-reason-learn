@@ -23,12 +23,12 @@ from openai.types.chat import (
 )
 from openai.types.chat.completion_create_params import ResponseFormat
 from openai.types.shared import ReasoningEffort
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from .._config import get_config
 from .._spec import Endpoint
 from .._usage import TokenCounts
-from ._base import GenerateRequest, Reply, classify, parsed, read_reply
+from ._base import GenerateRequest, Reply, body_error, classify, parsed, read_reply
 from ._http import cached, http_client
 from ._prompted import ReasoningAdapter
 
@@ -36,6 +36,7 @@ _FLEX_TIMEOUT: Final = 900.0
 _JSON_ONLY: Final = (
     "Reply with only a JSON object (no other text) matching this JSON schema:\n"
 )
+_NO_DETAILS: Final = "the reply finished with finish_reason=error"
 
 
 class OpenAICompatAdapter(ReasoningAdapter):
@@ -58,6 +59,8 @@ class OpenAICompatAdapter(ReasoningAdapter):
             raise classify(None, str(exc), {}) from exc
 
         def read(completion: ChatCompletion) -> Reply[str | BaseModel | None]:
+            if error := _error(completion):
+                raise body_error(error, raw.headers)
             output, unusable = _output(completion, request.schema)
             return Reply(
                 output,
@@ -183,6 +186,23 @@ def _response_format(
     if endpoint.json_object_only:
         return {"type": "json_object"}
     return type_to_response_format_param(request.schema)
+
+
+def _error(completion: ChatCompletion) -> JsonValue:
+    """The error a 200 reply carries in place of usable output, if any.
+
+    A gateway (OpenRouter) can report a failure this way: an ``error`` and no
+    choices, or a choice that finished with ``"error"``. An ``error`` beside
+    usable choices is not a failure.
+    """
+    error: JsonValue = (completion.model_extra or {}).get("error")
+    if not completion.choices:
+        return error
+    choice = completion.choices[0]
+    # "error" is OpenRouter's finish_reason, not in the OpenAI SDK's types.
+    if cast(str, choice.finish_reason) != "error":
+        return None
+    return error or (choice.model_extra or {}).get("error") or _NO_DETAILS
 
 
 def _output(

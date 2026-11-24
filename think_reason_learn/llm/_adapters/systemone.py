@@ -16,7 +16,14 @@ from .._config import get_config
 from .._questions import Answer, ChoiceQuestion, Question, YesNoQuestion
 from .._spec import Endpoint
 from .._usage import TokenCounts
-from ._base import Answers, DecisionAdapter, ProviderError, Reply, classify
+from ._base import (
+    Answers,
+    DecisionAdapter,
+    ProviderError,
+    Reply,
+    body_error,
+    classify,
+)
 from ._http import http_client
 
 type _Wire = dict[str, str | dict[str, str | None]]
@@ -51,6 +58,8 @@ class SystemOneAdapter(DecisionAdapter):
         if response.status_code != 200:
             raise classify(response.status_code, response.text[:300], response.headers)
         reply = _read(response)
+        if reply.error and not reply.answers:  # a failure sent with status 200
+            raise body_error(reply.error, response.headers)
         usage = _usage(reply.usage)
         return Reply(
             {qid: _answer(q, reply.answers.get(qid)) for qid, q in questions.items()},
@@ -119,6 +128,7 @@ class _Reply(BaseModel):
     answers: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
     model: str | None = None
     usage: JsonValue = None
+    error: JsonValue = None
 
 
 class _RawAnswer(BaseModel):
