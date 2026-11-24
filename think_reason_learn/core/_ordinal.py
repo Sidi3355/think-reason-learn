@@ -9,9 +9,10 @@ increasing cut-points ``t``:
 where ``z`` are the answers standardised on the training rows. A missing answer
 takes its column's training mean, so it adds nothing to ``eta``. With two
 outcomes this is L2 logistic regression. ``C`` is chosen by stratified folds on
-the mean AUC of the boundaries (outcome >= k against below, for each k), and
-the out-of-fold probabilities are returned with the fit, for reports and for
-cut-offs tuned on rows the model did not learn from.
+the out-of-fold log loss, ties going to the mean AUC of the boundaries
+(outcome >= k against below, for each k), and the out-of-fold probabilities are
+returned with the fit, for reports and for cut-offs tuned on rows the model did
+not learn from.
 """
 
 from __future__ import annotations
@@ -69,8 +70,8 @@ class OrdinalScorer:
         coef: One weight per column, on the standardised answers.
         thresholds: The ``K - 1`` cut-points on ``eta``, increasing.
         C: The inverse L2 strength it was fitted with.
-        cv_auc: The mean boundary AUC, out of fold, that chose ``C``; ``None``
-            when there were too few rows of an outcome for folds.
+        cv_auc: The mean boundary AUC, out of fold, of the chosen ``C``;
+            ``None`` when there were too few rows of an outcome for folds.
     """
 
     mean: Floats
@@ -129,13 +130,14 @@ def fit_ordinal(
 ) -> tuple[OrdinalScorer, Floats]:
     """Fit the cumulative-logit model, choosing ``C`` by stratified folds.
 
-    Each ``C`` in ``Cs`` is scored by the mean AUC of the boundaries on
-    out-of-fold scores, ties going to the lower out-of-fold log loss (cases
-    that every ``C`` ranks perfectly are told apart by how sure it is, not by
-    the strongest penalty), and the best is refitted on
-    every row. With fewer than two rows of an outcome for folds, the middle
-    ``C`` is fitted once, and the returned "out-of-fold" probabilities are the
-    fitted rows' own.
+    Each ``C`` in ``Cs`` is scored by its out-of-fold log loss, ties going to
+    the higher mean AUC of the boundaries on out-of-fold scores, and the best
+    is refitted on every row. (The AUC sees only the order of the cases: on
+    noisy answers it can prefer the strongest penalty, whose probabilities
+    stay near the outcome shares, so that every case gets the same most
+    probable outcome.) With fewer than two rows of an outcome for folds, the
+    middle ``C`` is fitted once, and the returned "out-of-fold" probabilities
+    are the fitted rows' own.
 
     Args:
         answers: One row per case, one column per check; NaN where unanswered.
@@ -212,13 +214,13 @@ def fit_ordinal(
             fold = fitted(train, c)
             eta[held_out] = fold.eta(answers[held_out])
             out_of_fold[held_out] = fold.proba(answers[held_out])
-        score = (mean_auc(boundary_aucs(y, eta, k)), -_log_loss(out_of_fold, y))
+        score = (-_log_loss(out_of_fold, y), mean_auc(boundary_aucs(y, eta, k)))
         if best is None or score > best[0]:
             best = (score, c, out_of_fold)
     assert best is not None  # Cs is not empty
     score, c, out_of_fold = best
     scorer = fitted(slice(None), c)
-    return replace(scorer, cv_auc=score[0]), out_of_fold
+    return replace(scorer, cv_auc=score[1]), out_of_fold
 
 
 def answer_spread(answers: Floats) -> Floats:
